@@ -151,7 +151,7 @@ struct MenuBarPopupView<Content: View>: View {
     }
 
     var computedYOffset: CGFloat {
-        return viewFrame.height / 2
+        return 0
     }
 }
 
