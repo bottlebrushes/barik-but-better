@@ -43,7 +43,7 @@ struct WiFiNetwork: Identifiable, Hashable {
 
 /// Unified view model for monitoring network and Wi‑Fi status.
 final class NetworkStatusViewModel: NSObject, ObservableObject,
-    CLLocationManagerDelegate
+    CLLocationManagerDelegate, CWEventDelegate
 {
 
     // States for Wi‑Fi and Ethernet obtained via NWPathMonitor.
@@ -81,6 +81,7 @@ final class NetworkStatusViewModel: NSObject, ObservableObject,
 
     private var timer: Timer?
     private let locationManager = CLLocationManager()
+    private var wifiClient: CWWiFiClient?
 
     override init() {
         super.init()
@@ -153,16 +154,61 @@ final class NetworkStatusViewModel: NSObject, ObservableObject,
     // MARK: — Updating Wi‑Fi information via CoreWLAN.
 
     private func startWiFiMonitoring() {
-        timer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) {
-            [weak self] _ in
-            self?.updateWiFiInfo()
+        // Set up CWWiFiClient delegate for event-based SSID and link changes
+        wifiClient = CWWiFiClient.shared()
+        wifiClient?.delegate = self
+        do {
+            try wifiClient?.startMonitoringEvent(with: .ssidDidChange)
+            try wifiClient?.startMonitoringEvent(with: .linkDidChange)
+        } catch {
+            print("Failed to start WiFi event monitoring: \(error)")
         }
+
+        // Initial update
         updateWiFiInfo()
+
+        // Reduced polling (30 seconds) for signal strength updates only when connected
+        // RSSI has no event API, so we need polling for signal strength
+        startSignalStrengthPolling()
     }
 
     private func stopWiFiMonitoring() {
         timer?.invalidate()
         timer = nil
+
+        // Stop monitoring WiFi events
+        do {
+            try wifiClient?.stopMonitoringEvent(with: .ssidDidChange)
+            try wifiClient?.stopMonitoringEvent(with: .linkDidChange)
+        } catch {
+            print("Failed to stop WiFi event monitoring: \(error)")
+        }
+        wifiClient?.delegate = nil
+        wifiClient = nil
+    }
+
+    /// Start reduced polling for signal strength (RSSI) updates.
+    /// Only polls when WiFi is connected since RSSI has no event API.
+    private func startSignalStrengthPolling() {
+        timer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) {
+            [weak self] _ in
+            guard let self = self else { return }
+            // Only poll for signal strength when WiFi is connected
+            if self.wifiState == .connected || self.wifiState == .connectedWithoutInternet {
+                self.updateSignalStrength()
+            }
+        }
+    }
+
+    /// Update only signal strength (RSSI and noise) - used for polling
+    private func updateSignalStrength() {
+        let client = CWWiFiClient.shared()
+        if let interface = client.interface(), interface.ssid() != nil {
+            DispatchQueue.main.async {
+                self.rssi = interface.rssiValue()
+                self.noise = interface.noiseMeasurement()
+            }
+        }
     }
 
     private func updateWiFiInfo() {
@@ -195,6 +241,23 @@ final class NetworkStatusViewModel: NSObject, ObservableObject,
             self.rssi = 0
             self.noise = 0
             self.channel = "N/A"
+        }
+    }
+
+    // MARK: — CWEventDelegate
+
+    /// Called when SSID changes (connecting to different network)
+    func ssidDidChangeForWiFiInterface(withName interfaceName: String) {
+        DispatchQueue.main.async {
+            self.updateWiFiInfo()
+        }
+    }
+
+    /// Called when link state changes (connected/disconnected)
+    func linkDidChangeForWiFiInterface(withName interfaceName: String) {
+        DispatchQueue.main.async {
+            self.updateWiFiInfo()
+            self.checkWiFiPowerState()
         }
     }
 

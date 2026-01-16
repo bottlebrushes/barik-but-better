@@ -4,10 +4,10 @@ import Foundation
 
 class SpacesViewModel: ObservableObject {
     @Published var spaces: [AnySpace] = []
-    private var timer: Timer?
     private var provider: AnySpacesProvider?
     private var cancellables: Set<AnyCancellable> = []
     private var spacesById: [String: AnySpace] = [:]
+    private var workspaceObservers: [NSObjectProtocol] = []
 
     init() {
         let runningApps = NSWorkspace.shared.runningApplications.compactMap {
@@ -32,7 +32,7 @@ class SpacesViewModel: ObservableObject {
             if provider.isEventBased {
                 startMonitoringEventBasedProvider()
             } else {
-                startMonitoringPollingBasedProvider()
+                startMonitoringWithWorkspaceNotifications()
             }
         }
     }
@@ -42,22 +42,54 @@ class SpacesViewModel: ObservableObject {
             if provider.isEventBased {
                 stopMonitoringEventBasedProvider()
             } else {
-                stopMonitoringPollingBasedProvider()
+                stopMonitoringWorkspaceNotifications()
             }
         }
     }
 
-    private func startMonitoringPollingBasedProvider() {
-        timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) {
-            [weak self] _ in
+    private func startMonitoringWithWorkspaceNotifications() {
+        let notificationCenter = NSWorkspace.shared.notificationCenter
+
+        // Observe space changes
+        let spaceObserver = notificationCenter.addObserver(
+            forName: NSWorkspace.activeSpaceDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
             self?.loadSpaces()
         }
+        workspaceObservers.append(spaceObserver)
+
+        // Observe application activation (may indicate space/window changes)
+        let activateObserver = notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.loadSpaces()
+        }
+        workspaceObservers.append(activateObserver)
+
+        // Observe application deactivation
+        let deactivateObserver = notificationCenter.addObserver(
+            forName: NSWorkspace.didDeactivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.loadSpaces()
+        }
+        workspaceObservers.append(deactivateObserver)
+
+        // Load initial state
         loadSpaces()
     }
 
-    private func stopMonitoringPollingBasedProvider() {
-        timer?.invalidate()
-        timer = nil
+    private func stopMonitoringWorkspaceNotifications() {
+        let notificationCenter = NSWorkspace.shared.notificationCenter
+        for observer in workspaceObservers {
+            notificationCenter.removeObserver(observer)
+        }
+        workspaceObservers.removeAll()
     }
 
     private func startMonitoringEventBasedProvider() {

@@ -3,7 +3,7 @@ import SwiftUI
 private var panel: NSPanel?
 
 class HidingPanel: NSPanel, NSWindowDelegate {
-    var hideTimer: Timer?
+    var hideWorkItem: DispatchWorkItem?
 
     override var canBecomeKey: Bool {
         return true
@@ -23,13 +23,12 @@ class HidingPanel: NSPanel, NSWindowDelegate {
 
     func windowDidResignKey(_ notification: Notification) {
         NotificationCenter.default.post(name: .willHideWindow, object: nil)
-        hideTimer = Timer.scheduledTimer(
-            withTimeInterval: TimeInterval(
-                Constants.menuBarPopupAnimationDurationInMilliseconds) / 1000.0,
-            repeats: false
-        ) { [weak self] _ in
+        let workItem = DispatchWorkItem { [weak self] in
             self?.orderOut(nil)
         }
+        hideWorkItem = workItem
+        let duration = Double(Constants.menuBarPopupAnimationDurationInMilliseconds) / 1000.0
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: workItem)
     }
 }
 
@@ -59,8 +58,8 @@ class MenuBarPopup {
         lastContentIdentifier = id
 
         if let hidingPanel = panel as? HidingPanel {
-            hidingPanel.hideTimer?.invalidate()
-            hidingPanel.hideTimer = nil
+            hidingPanel.hideWorkItem?.cancel()
+            hidingPanel.hideWorkItem = nil
         }
 
         if panel.isKeyWindow {
