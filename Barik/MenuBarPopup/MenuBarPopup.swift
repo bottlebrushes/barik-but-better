@@ -72,13 +72,10 @@ class MenuBarPopup {
             DispatchQueue.main.asyncAfter(deadline: .now() + duration) {
                 panel.contentView = NSHostingView(
                     rootView:
-                        ZStack {
-                            MenuBarPopupView(widgetRect: rect) {
-                                content()
-                            }
-                            .position(x: rect.midX)
+                        MenuBarPopupView(widgetRect: rect) {
+                            content()
                         }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                         .id(UUID())
                 )
                 panel.makeKeyAndOrderFront(nil)
@@ -90,13 +87,10 @@ class MenuBarPopup {
         } else {
             panel.contentView = NSHostingView(
                 rootView:
-                    ZStack {
-                        MenuBarPopupView(widgetRect: rect) {
-                            content()
-                        }
-                        .position(x: rect.midX)
+                    MenuBarPopupView(widgetRect: rect) {
+                        content()
                     }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             )
             panel.makeKeyAndOrderFront(nil)
             DispatchQueue.main.async {
@@ -107,13 +101,11 @@ class MenuBarPopup {
     }
 
     static func setup() {
-        guard let screen = NSScreen.main?.visibleFrame else { return }
-        let panelFrame = NSRect(
-            x: 0,
-            y: 0,
-            width: screen.size.width,
-            height: screen.size.height
-        )
+        guard let screen = NSScreen.main else { return }
+
+        // Use full screen frame so the panel covers the entire screen including menu bar area
+        // This ensures consistent positioning regardless of dock position or menu bar configuration
+        let panelFrame = screen.frame
 
         let newPanel = HidingPanel(
             contentRect: panelFrame,
