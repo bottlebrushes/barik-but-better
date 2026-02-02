@@ -63,6 +63,10 @@ struct MenuBarView: View {
             WeatherWidget()
                 .environmentObject(config)
 
+        case "default.claude-usage":
+            ClaudeUsageWidget()
+                .environmentObject(config)
+
         case "spacer":
             Spacer().frame(minWidth: 50, maxWidth: .infinity)
 

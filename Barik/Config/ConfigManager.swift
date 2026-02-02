@@ -72,6 +72,7 @@ final class ConfigManager: ObservableObject {
             displayed = [ # widgets on menu bar
                 "default.spaces",
                 "spacer",
+                "default.claude-usage",
                 "default.nowplaying",
                 "default.network",
                 "default.battery",
@@ -84,6 +85,11 @@ final class ConfigManager: ObservableObject {
             space.show-key = true        # show space number (or character, if you use AeroSpace)
             window.show-title = true
             window.title.max-length = 50
+
+            [widgets.default.claude-usage]
+            plan = "pro"
+            five-hour-limit = 80
+            weekly-limit = 500
 
             [widgets.default.battery]
             show-percentage = true
