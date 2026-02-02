@@ -8,6 +8,8 @@ A fork of [barik](https://github.com/mocki-toki/barik) with active improvements 
 
 ## Improvements over barik
 
+- **Drag-and-drop widget reordering** - Drag widgets directly in the menu bar to rearrange them, order persists to config
+- **Claude Code usage widget** - Track API usage in real-time with a donut ring indicator that changes color at thresholds, plus a popup with rolling window and weekly stats
 - **Drastically reduced CPU usage** - Replaced polling with event-driven notifications for music playback and space changes
 - **Enhanced calendar popup** - Day view with event selection and detailed event information
 - **Click to open music player** - Click on album art, song title, or artist in the now playing popup to open Spotify or Apple Music
