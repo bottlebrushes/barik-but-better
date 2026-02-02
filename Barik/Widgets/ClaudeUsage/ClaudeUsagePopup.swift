@@ -6,15 +6,15 @@ struct ClaudeUsagePopup: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            if usageManager.usageData.isAvailable {
+            if !usageManager.isConnected {
+                connectView
+            } else if usageManager.usageData.isAvailable {
                 titleBar
                 Divider().background(Color.white.opacity(0.2))
                 rateLimitSection(
                     icon: "clock",
                     title: "5-Hour Window",
                     percentage: usageManager.usageData.fiveHourPercentage,
-                    count: usageManager.usageData.fiveHourCount,
-                    limit: usageManager.usageData.fiveHourLimit,
                     resetDate: usageManager.usageData.fiveHourResetDate,
                     resetPrefix: "Resets in"
                 )
@@ -23,17 +23,13 @@ struct ClaudeUsagePopup: View {
                     icon: "calendar",
                     title: "Weekly",
                     percentage: usageManager.usageData.weeklyPercentage,
-                    count: usageManager.usageData.weeklyCount,
-                    limit: usageManager.usageData.weeklyLimit,
                     resetDate: usageManager.usageData.weeklyResetDate,
                     resetPrefix: "Resets"
                 )
                 Divider().background(Color.white.opacity(0.2))
-                todaySection
-                Divider().background(Color.white.opacity(0.2))
                 footerSection
             } else {
-                unavailableView
+                loadingView
             }
         }
         .frame(width: 280)
@@ -79,8 +75,6 @@ struct ClaudeUsagePopup: View {
         icon: String,
         title: String,
         percentage: Double,
-        count: Int,
-        limit: Int,
         resetDate: Date?,
         resetPrefix: String
     ) -> some View {
@@ -146,21 +140,6 @@ struct ClaudeUsagePopup: View {
         }
     }
 
-    // MARK: - Today Section
-
-    private var todaySection: some View {
-        HStack {
-            Text("Today")
-                .font(.system(size: 13, weight: .medium))
-                .opacity(0.7)
-            Spacer()
-            Text("\(usageManager.usageData.todayMessages) messages")
-                .font(.system(size: 13, weight: .semibold))
-        }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 14)
-    }
-
     // MARK: - Footer
 
     private var footerSection: some View {
@@ -199,21 +178,62 @@ struct ClaudeUsagePopup: View {
         return "\(minutes / 60)h ago"
     }
 
-    // MARK: - Unavailable
+    // MARK: - Connect
 
-    private var unavailableView: some View {
-        VStack(spacing: 12) {
+    private var connectView: some View {
+        VStack(spacing: 14) {
             Image("ClaudeIcon")
                 .resizable()
                 .scaledToFit()
                 .frame(width: 28, height: 28)
-                .opacity(0.4)
-            Text("Claude Code not found")
-                .font(.system(size: 13, weight: .medium))
-            Text("Install Claude Code to see usage stats")
+
+            Text("Claude Usage")
+                .font(.system(size: 14, weight: .semibold))
+
+            Text("View your Claude rate limit usage directly in the menu bar.")
                 .font(.system(size: 11))
                 .opacity(0.5)
                 .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Button(action: {
+                usageManager.requestAccess()
+            }) {
+                Text("Allow Access")
+                    .font(.system(size: 12, weight: .medium))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(Color(red: 0.89, green: 0.45, blue: 0.29))
+            .onHover { hovering in
+                if hovering {
+                    NSCursor.pointingHand.push()
+                } else {
+                    NSCursor.pop()
+                }
+            }
+
+            Text("Reads credentials from your Claude Code keychain entry.")
+                .font(.system(size: 10))
+                .opacity(0.3)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 30)
+        .padding(.vertical, 30)
+    }
+
+    // MARK: - Loading
+
+    private var loadingView: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+                .scaleEffect(0.8)
+            Text("Loading usage data...")
+                .font(.system(size: 11))
+                .opacity(0.5)
         }
         .frame(maxWidth: .infinity)
         .padding(40)

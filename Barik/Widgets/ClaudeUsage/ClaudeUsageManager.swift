@@ -1,53 +1,41 @@
 import Foundation
+import Security
 import SwiftUI
 
 // MARK: - Data Models
 
-struct ClaudeStatsCache: Codable {
-    let version: Int
-    let lastComputedDate: String
-    let dailyActivity: [DailyActivity]
-    let modelUsage: [String: ModelUsage]
-    let totalSessions: Int
-    let totalMessages: Int
-
-    struct DailyActivity: Codable {
-        let date: String
-        let messageCount: Int
-        let sessionCount: Int
-        let toolCallCount: Int
-    }
-
-    struct ModelUsage: Codable {
-        let inputTokens: Int
-        let outputTokens: Int
-        let cacheReadInputTokens: Int
-        let cacheCreationInputTokens: Int
-    }
-}
-
-struct HistoryEntry: Codable {
-    let display: String?
-    let timestamp: Double
-    let project: String?
-}
-
 struct ClaudeUsageData {
-    var fiveHourCount: Int = 0
-    var fiveHourLimit: Int = 80
     var fiveHourPercentage: Double = 0
     var fiveHourResetDate: Date?
 
-    var weeklyCount: Int = 0
-    var weeklyLimit: Int = 500
     var weeklyPercentage: Double = 0
     var weeklyResetDate: Date?
-
-    var todayMessages: Int = 0
 
     var plan: String = "Pro"
     var lastUpdated: Date = Date()
     var isAvailable: Bool = false
+}
+
+private struct UsageResponse: Codable {
+    let fiveHour: UsageBucket?
+    let sevenDay: UsageBucket?
+    let sevenDaySonnet: UsageBucket?
+
+    enum CodingKeys: String, CodingKey {
+        case fiveHour = "five_hour"
+        case sevenDay = "seven_day"
+        case sevenDaySonnet = "seven_day_sonnet"
+    }
+
+    struct UsageBucket: Codable {
+        let utilization: Double
+        let resetsAt: String
+
+        enum CodingKeys: String, CodingKey {
+            case utilization
+            case resetsAt = "resets_at"
+        }
+    }
 }
 
 // MARK: - Manager
@@ -57,43 +45,26 @@ final class ClaudeUsageManager: ObservableObject {
     static let shared = ClaudeUsageManager()
 
     @Published private(set) var usageData = ClaudeUsageData()
+    @Published private(set) var isConnected: Bool = false
 
-    private var statsWatchSource: DispatchSourceFileSystemObject?
-    private var statsFileDescriptor: CInt = -1
-    private var historyWatchSource: DispatchSourceFileSystemObject?
-    private var historyFileDescriptor: CInt = -1
     private var refreshTimer: Timer?
-
+    private var cachedCredentials: (accessToken: String, plan: String)?
     private var currentConfig: ConfigData = [:]
 
-    private let statsCachePath: String
-    private let historyPath: String
-    private let projectsPath: String
+    private static let connectedKey = "claude-usage-connected"
 
-    private init() {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        statsCachePath = "\(home)/.claude/stats-cache.json"
-        historyPath = "\(home)/.claude/history.jsonl"
-        projectsPath = "\(home)/.claude/projects"
-    }
+    private init() {}
 
     func startUpdating(config: ConfigData) {
         currentConfig = config
-        fetchData()
-        startWatching(path: statsCachePath, source: &statsWatchSource, descriptor: &statsFileDescriptor)
-        startWatching(path: historyPath, source: &historyWatchSource, descriptor: &historyFileDescriptor)
-        // Periodically rescan session files since we can't watch them all individually
-        refreshTimer?.invalidate()
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.fetchData()
-            }
+
+        // If user previously granted access, try to connect silently
+        if UserDefaults.standard.bool(forKey: Self.connectedKey) {
+            connectAndFetch()
         }
     }
 
     func stopUpdating() {
-        stopWatching(source: &statsWatchSource, descriptor: &statsFileDescriptor)
-        stopWatching(source: &historyWatchSource, descriptor: &historyFileDescriptor)
         refreshTimer?.invalidate()
         refreshTimer = nil
     }
@@ -102,251 +73,95 @@ final class ClaudeUsageManager: ObservableObject {
         fetchData()
     }
 
-    // MARK: - File Watching
+    /// Called when user explicitly clicks "Allow Access" in the popup.
+    /// Triggers the macOS Keychain permission dialog.
+    func requestAccess() {
+        connectAndFetch()
+    }
 
-    private func startWatching(
-        path: String,
-        source: inout DispatchSourceFileSystemObject?,
-        descriptor: inout CInt
-    ) {
-        stopWatching(source: &source, descriptor: &descriptor)
+    private func connectAndFetch() {
+        guard let creds = readKeychainCredentials() else {
+            isConnected = false
+            cachedCredentials = nil
+            UserDefaults.standard.set(false, forKey: Self.connectedKey)
+            return
+        }
 
-        descriptor = open(path, O_EVTONLY)
-        if descriptor == -1 { return }
+        cachedCredentials = creds
+        isConnected = true
+        UserDefaults.standard.set(true, forKey: Self.connectedKey)
+        fetchData()
 
-        let newSource = DispatchSource.makeFileSystemObjectSource(
-            fileDescriptor: descriptor,
-            eventMask: [.write, .extend],
-            queue: DispatchQueue.global()
-        )
-        newSource.setEventHandler { [weak self] in
+        refreshTimer?.invalidate()
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.fetchData()
             }
         }
-        let fd = descriptor
-        newSource.setCancelHandler {
-            if fd != -1 { close(fd) }
-        }
-        newSource.resume()
-        source = newSource
-    }
-
-    private func stopWatching(
-        source: inout DispatchSourceFileSystemObject?,
-        descriptor: inout CInt
-    ) {
-        source?.cancel()
-        source = nil
-        descriptor = -1
     }
 
     // MARK: - Data Fetching
 
     private func fetchData() {
-        let config = currentConfig
-        let fiveHourLimit = config["five-hour-limit"]?.intValue ?? 80
-        let weeklyLimit = config["weekly-limit"]?.intValue ?? 500
-        let plan = config["plan"]?.stringValue ?? "Pro"
+        guard let creds = cachedCredentials else { return }
 
-        // Get counts from session JSONL files (captures all sessions including Conductor agents)
-        let sessionCounts = computeFromSessions()
-        // Fall back to history.jsonl for direct CLI usage
-        let historyCounts = computeFromHistory()
+        let plan = currentConfig["plan"]?.stringValue ?? creds.plan
 
-        // Use whichever source reports more messages (session files are the superset)
-        let fiveHourCount = max(sessionCounts.fiveHourCount, historyCounts.fiveHourCount)
-        let todayMessages = max(sessionCounts.todayCount, historyCounts.todayCount)
-        let fiveHourResetDate = sessionCounts.fiveHourCount >= historyCounts.fiveHourCount
-            ? sessionCounts.fiveHourResetDate
-            : historyCounts.fiveHourResetDate
+        Task {
+            guard let response = await fetchUsageFromAPI(token: creds.accessToken) else { return }
 
-        // Get weekly count from stats-cache.json (may lag behind)
-        var weeklyCount = todayMessages // Start with today's count
-        if FileManager.default.fileExists(atPath: statsCachePath) {
-            do {
-                let statsData = try Data(contentsOf: URL(fileURLWithPath: statsCachePath))
-                let stats = try JSONDecoder().decode(ClaudeStatsCache.self, from: statsData)
+            let isoFormatter = ISO8601DateFormatter()
+            isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
 
-                let todayString = Self.dateFormatter.string(from: Date())
+            var data = ClaudeUsageData()
+            data.fiveHourPercentage = (response.fiveHour?.utilization ?? 0) / 100
+            data.fiveHourResetDate = response.fiveHour.flatMap { isoFormatter.date(from: $0.resetsAt) }
+            data.weeklyPercentage = (response.sevenDay?.utilization ?? 0) / 100
+            data.weeklyResetDate = response.sevenDay.flatMap { isoFormatter.date(from: $0.resetsAt) }
+            data.plan = plan.capitalized
+            data.lastUpdated = Date()
+            data.isAvailable = true
 
-                // Add prior days this week from stats-cache
-                weeklyCount += computeWeeklyCount(from: stats.dailyActivity, excludingToday: todayString)
-            } catch {
-                print("ClaudeUsageManager: Error reading stats-cache: \(error)")
-            }
+            self.usageData = data
         }
-
-        var data = ClaudeUsageData()
-        data.fiveHourCount = fiveHourCount
-        data.fiveHourLimit = fiveHourLimit
-        data.fiveHourPercentage = fiveHourLimit > 0 ? Double(fiveHourCount) / Double(fiveHourLimit) : 0
-        data.fiveHourResetDate = fiveHourResetDate
-
-        data.weeklyCount = weeklyCount
-        data.weeklyLimit = weeklyLimit
-        data.weeklyPercentage = weeklyLimit > 0 ? Double(weeklyCount) / Double(weeklyLimit) : 0
-        data.weeklyResetDate = nextWeeklyReset()
-
-        data.todayMessages = todayMessages
-        data.plan = plan
-        data.lastUpdated = Date()
-        data.isAvailable = todayMessages > 0 || FileManager.default.fileExists(atPath: statsCachePath)
-
-        usageData = data
     }
 
-    // MARK: - Computations
+    // MARK: - API
 
-    private func computeWeeklyCount(from dailyActivity: [ClaudeStatsCache.DailyActivity], excludingToday todayString: String) -> Int {
-        let now = Date()
-        var calendar = Calendar.current
-        calendar.firstWeekday = 2 // Monday
-        guard let startOfWeek = calendar.date(from: calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: now)) else {
-            return 0
-        }
-        let startString = Self.dateFormatter.string(from: startOfWeek)
-        return dailyActivity
-            .filter { $0.date >= startString && $0.date != todayString }
-            .reduce(0) { $0 + $1.messageCount }
+    private func fetchUsageFromAPI(token: String) async -> UsageResponse? {
+        guard let url = URL(string: "https://api.anthropic.com/api/oauth/usage") else { return nil }
+
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
+        request.timeoutInterval = 5
+
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse,
+              http.statusCode == 200 else { return nil }
+
+        return try? JSONDecoder().decode(UsageResponse.self, from: data)
     }
 
-    /// Scans session JSONL files in ~/.claude/projects/ for user messages
-    private func computeFromSessions() -> (fiveHourCount: Int, fiveHourResetDate: Date?, todayCount: Int) {
-        let fm = FileManager.default
-        guard fm.fileExists(atPath: projectsPath),
-              let enumerator = fm.enumerator(atPath: projectsPath) else {
-            return (0, nil, 0)
+    // MARK: - Keychain
+
+    private func readKeychainCredentials() -> (accessToken: String, plan: String)? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "Claude Code-credentials",
+            kSecReturnData as String: true,
+        ]
+        var result: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess,
+              let data = result as? Data,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let oauth = json["claudeAiOauth"] as? [String: Any],
+              let token = oauth["accessToken"] as? String else {
+            return nil
         }
-
-        let now = Date()
-        let fiveHoursAgo = now.addingTimeInterval(-5 * 3600)
-        let startOfDay = Calendar.current.startOfDay(for: now)
-        let todayPrefix = Self.dateFormatter.string(from: now)
-
-        let isoFormatter = ISO8601DateFormatter()
-        isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-
-        var fiveHourCount = 0
-        var todayCount = 0
-        var oldestInWindow: Date?
-
-        while let relativePath = enumerator.nextObject() as? String {
-            guard relativePath.hasSuffix(".jsonl") else { continue }
-
-            let fullPath = "\(projectsPath)/\(relativePath)"
-
-            // Skip files not modified since start of day
-            guard let attrs = try? fm.attributesOfItem(atPath: fullPath),
-                  let modDate = attrs[.modificationDate] as? Date,
-                  modDate >= startOfDay else { continue }
-
-            guard let data = fm.contents(atPath: fullPath),
-                  let content = String(data: data, encoding: .utf8) else { continue }
-
-            for line in content.components(separatedBy: "\n") {
-                // Quick pre-filter to avoid JSON parsing on non-user lines
-                guard !line.isEmpty, line.contains("\"type\":\"user\"") || line.contains("\"type\": \"user\"") else {
-                    continue
-                }
-                // Skip tool-result continuations — these are internal API round-trips, not real messages
-                if line.contains("\"tool_result\"") { continue }
-
-                guard let lineData = line.data(using: .utf8),
-                      let entry = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
-                      entry["type"] as? String == "user",
-                      let timestamp = entry["timestamp"] as? String else { continue }
-
-                // Quick prefix check before full ISO parse
-                guard timestamp.hasPrefix(todayPrefix) else { continue }
-
-                guard let date = isoFormatter.date(from: timestamp) else { continue }
-
-                todayCount += 1
-
-                if date >= fiveHoursAgo {
-                    fiveHourCount += 1
-                    if oldestInWindow == nil || date < oldestInWindow! {
-                        oldestInWindow = date
-                    }
-                }
-            }
-        }
-
-        let resetDate = oldestInWindow?.addingTimeInterval(5 * 3600)
-        return (fiveHourCount, resetDate, todayCount)
+        let plan = oauth["subscriptionType"] as? String ?? "pro"
+        return (token, plan)
     }
-
-    /// Parses history.jsonl and returns (fiveHourCount, fiveHourResetDate, todayCount)
-    private func computeFromHistory() -> (fiveHourCount: Int, fiveHourResetDate: Date?, todayCount: Int) {
-        guard FileManager.default.fileExists(atPath: historyPath),
-              let data = FileManager.default.contents(atPath: historyPath),
-              let content = String(data: data, encoding: .utf8) else {
-            return (0, nil, 0)
-        }
-
-        let now = Date()
-        let fiveHoursAgo = now.addingTimeInterval(-5 * 3600)
-        let fiveHoursAgoMs = fiveHoursAgo.timeIntervalSince1970 * 1000
-        let startOfDay = Calendar.current.startOfDay(for: now)
-        let startOfDayMs = startOfDay.timeIntervalSince1970 * 1000
-
-        let decoder = JSONDecoder()
-        let lines = content.components(separatedBy: "\n")
-
-        var fiveHourCount = 0
-        var todayCount = 0
-        var oldestInWindow: Double?
-
-        for line in lines.reversed() {
-            guard !line.isEmpty,
-                  let lineData = line.data(using: .utf8),
-                  let entry = try? decoder.decode(HistoryEntry.self, from: lineData) else {
-                continue
-            }
-
-            // Stop once we're past both windows
-            if entry.timestamp < startOfDayMs && entry.timestamp < fiveHoursAgoMs {
-                break
-            }
-
-            if entry.timestamp >= fiveHoursAgoMs {
-                fiveHourCount += 1
-                if oldestInWindow == nil || entry.timestamp < (oldestInWindow ?? .infinity) {
-                    oldestInWindow = entry.timestamp
-                }
-            }
-
-            if entry.timestamp >= startOfDayMs {
-                todayCount += 1
-            }
-        }
-
-        let resetDate = oldestInWindow.map {
-            Date(timeIntervalSince1970: $0 / 1000).addingTimeInterval(5 * 3600)
-        }
-
-        return (fiveHourCount, resetDate, todayCount)
-    }
-
-    private func nextWeeklyReset() -> Date {
-        var calendar = Calendar.current
-        calendar.firstWeekday = 2
-        let now = Date()
-        var components = calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: now)
-        components.weekday = 2
-        components.hour = 0
-        components.minute = 0
-        var resetDate = calendar.date(from: components) ?? now
-        if resetDate <= now {
-            resetDate = calendar.date(byAdding: .weekOfYear, value: 1, to: resetDate) ?? now
-        }
-        return resetDate
-    }
-
-    private static let dateFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd"
-        return f
-    }()
 }
