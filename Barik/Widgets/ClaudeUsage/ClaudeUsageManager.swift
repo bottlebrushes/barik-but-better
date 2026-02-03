@@ -57,9 +57,12 @@ final class ClaudeUsageManager: ObservableObject {
 
     func startUpdating(config: ConfigData) {
         currentConfig = config
+    }
 
-        // If user previously granted access, try to connect silently
-        if UserDefaults.standard.bool(forKey: Self.connectedKey) {
+    /// Called when the popup appears. Reconnects silently if the user previously granted access,
+    /// deferring keychain access until the user actually interacts with the widget.
+    func reconnectIfNeeded() {
+        if !isConnected && UserDefaults.standard.bool(forKey: Self.connectedKey) {
             connectAndFetch()
         }
     }

@@ -34,6 +34,9 @@ struct ClaudeUsagePopup: View {
         }
         .frame(width: 280)
         .background(Color.black)
+        .onAppear {
+            usageManager.reconnectIfNeeded()
+        }
     }
 
     // MARK: - Title Bar

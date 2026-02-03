@@ -10,8 +10,10 @@ struct PomodoroWidget: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            Image(systemName: manager.isActive ? "timer" : "timer")
-                .font(.system(size: 12))
+            Image("TomatoIcon")
+                .resizable()
+                .scaledToFit()
+                .frame(width: 20, height: 20)
                 .foregroundStyle(phaseColor)
 
             if manager.isActive {
