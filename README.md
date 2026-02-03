@@ -69,6 +69,18 @@ cp -R ~/Library/Developer/Xcode/DerivedData/Barik-*/Build/Products/Release/Barik
 
 > **Note:** Building from source requires Xcode (not just Command Line Tools).
 
+### Troubleshooting: "damaged and should be moved to Trash"
+
+If macOS says the app is damaged, run this command to remove the quarantine attribute:
+
+```sh
+xattr -cr /Applications/Barik.app
+```
+
+Alternatively, you can right-click the app in Finder and select **Open** to bypass the Gatekeeper warning.
+
+This happens because the app is not notarized with Apple. It is safe to use — you can verify by [building from source](#or-build-from-source).
+
 ### Set up your desktop
 
 1. _(Optional)_ To display open applications and spaces, install [**yabai**](https://github.com/koekeishiya/yabai) or [**AeroSpace**](https://github.com/nikitabobko/AeroSpace) and set up hotkeys. For **yabai**, you'll need **skhd** or **Raycast scripts**. Don't forget to configure **top padding** — [here's an example for **yabai**](https://github.com/mocki-toki/barik/blob/main/example/.yabairc).

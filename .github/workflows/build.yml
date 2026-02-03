@@ -16,6 +16,13 @@ jobs:
             -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO
 
+      - name: Ad-hoc sign app
+        run: |
+          codesign --force --deep --sign - \
+            --entitlements Barik/Barik.entitlements \
+            --options runtime \
+            build/Build/Products/Release/Barik.app
+
       - name: Zip app
         run: ditto -c -k --keepParent build/Build/Products/Release/Barik.app Barik.zip
 
