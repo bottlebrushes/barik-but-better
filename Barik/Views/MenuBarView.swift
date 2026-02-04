@@ -103,6 +103,10 @@ struct MenuBarView: View {
             PomodoroWidget()
                 .environmentObject(config)
 
+        case "default.countdown":
+            CountdownWidget()
+                .environmentObject(config)
+
         case "spacer":
             Spacer().frame(minWidth: 50, maxWidth: .infinity)
 

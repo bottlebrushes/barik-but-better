@@ -77,6 +77,7 @@ final class ConfigManager: ObservableObject {
                 "default.nowplaying",
                 "default.network",
                 "default.battery",
+                "default.countdown",
                 "divider",
                 # { "default.time" = { time-zone = "America/Los_Angeles", format = "E d, hh:mm" } },
                 "default.time"
