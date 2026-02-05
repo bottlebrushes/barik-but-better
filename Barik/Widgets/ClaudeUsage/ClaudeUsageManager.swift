@@ -53,7 +53,17 @@ final class ClaudeUsageManager: ObservableObject {
 
     private static let connectedKey = "claude-usage-connected"
 
-    private init() {}
+    private init() {
+        NotificationCenter.default.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.handleWake()
+            }
+        }
+    }
 
     func startUpdating(config: ConfigData) {
         currentConfig = config
@@ -80,6 +90,18 @@ final class ClaudeUsageManager: ObservableObject {
     /// Triggers the macOS Keychain permission dialog.
     func requestAccess() {
         connectAndFetch()
+    }
+
+    private func handleWake() {
+        guard isConnected, cachedCredentials != nil else { return }
+        // Restart the timer since sleep may have disrupted it
+        refreshTimer?.invalidate()
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.fetchData()
+            }
+        }
+        fetchData()
     }
 
     private func connectAndFetch() {
