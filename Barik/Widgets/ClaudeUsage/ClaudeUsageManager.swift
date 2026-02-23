@@ -54,7 +54,7 @@ final class ClaudeUsageManager: ObservableObject {
     private static let connectedKey = "claude-usage-connected"
 
     private init() {
-        NotificationCenter.default.addObserver(
+        NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification,
             object: nil,
             queue: .main
@@ -67,6 +67,7 @@ final class ClaudeUsageManager: ObservableObject {
 
     func startUpdating(config: ConfigData) {
         currentConfig = config
+        reconnectIfNeeded()
     }
 
     /// Called when the popup appears. Reconnects silently if the user previously granted access,
@@ -83,7 +84,11 @@ final class ClaudeUsageManager: ObservableObject {
     }
 
     func refresh() {
-        fetchData()
+        if cachedCredentials == nil {
+            connectAndFetch()
+        } else {
+            fetchData()
+        }
     }
 
     /// Called when user explicitly clicks "Allow Access" in the popup.
