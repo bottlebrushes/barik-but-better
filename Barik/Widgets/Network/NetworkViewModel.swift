@@ -115,8 +115,16 @@ final class NetworkStatusViewModel: NSObject, ObservableObject,
                         default:
                             self.wifiState = .connectedWithoutInternet
                         }
+                    } else if let interface = CWWiFiClient.shared().interface(),
+                              interface.powerOn(),
+                              interface.rssiValue() < 0 {
+                        // WiFi is physically connected (has signal) but traffic
+                        // is routed through a VPN tunnel, so NWPathMonitor
+                        // doesn't report WiFi as the active transport.
+                        // rssiValue() returns a negative dBm when associated,
+                        // 0 when not — and unlike ssid(), needs no location auth.
+                        self.wifiState = path.status == .satisfied ? .connected : .connectedWithoutInternet
                     } else {
-                        // If the Wi‑Fi interface is available but not in use – consider it enabled but not connected.
                         self.wifiState = .disconnected
                     }
                 } else {
