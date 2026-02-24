@@ -10,6 +10,14 @@ struct ClaudeUsageWidget: View {
         usageManager.usageData.fiveHourPercentage
     }
 
+    private var weeklyRemaining: Double {
+        max(0, min(1, 1 - usageManager.usageData.weeklyPercentage))
+    }
+
+    private var claudeOrange: Color {
+        Color(red: 0.89, green: 0.45, blue: 0.29)
+    }
+
     private var ringColor: Color {
         if percentage >= 0.8 { return .red }
         if percentage >= 0.6 { return .orange }
@@ -26,10 +34,7 @@ struct ClaudeUsageWidget: View {
                     .animation(.easeOut(duration: 0.3), value: percentage)
             }
 
-            Image("ClaudeIcon")
-                .resizable()
-                .scaledToFit()
-                .frame(width: 16, height: 16)
+            drainableIcon
         }
         .frame(width: 28, height: 28)
         .foregroundStyle(.foregroundOutside)
@@ -56,6 +61,31 @@ struct ClaudeUsageWidget: View {
         }
         .onAppear {
             usageManager.startUpdating(config: configProvider.config)
+        }
+    }
+
+    private var drainableIcon: some View {
+        let iconSize: CGFloat = 16
+
+        return ZStack {
+            Image("ClaudeIcon")
+                .resizable()
+                .renderingMode(.template)
+                .scaledToFit()
+                .foregroundStyle(.white)
+                .frame(width: iconSize, height: iconSize)
+
+            Rectangle()
+                .fill(claudeOrange)
+                .frame(width: iconSize, height: iconSize * weeklyRemaining)
+                .frame(width: iconSize, height: iconSize, alignment: .bottom)
+                .animation(.easeOut(duration: 0.8), value: weeklyRemaining)
+                .mask(
+                    Image("ClaudeIcon")
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: iconSize, height: iconSize)
+                )
         }
     }
 }
