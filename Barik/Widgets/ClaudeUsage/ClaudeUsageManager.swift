@@ -142,10 +142,13 @@ final class ClaudeUsageManager: ObservableObject {
             let isoFormatter = ISO8601DateFormatter()
             isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
 
+            let fiveHourLimit = Double(currentConfig["five-hour-limit"]?.intValue ?? 100)
+            let weeklyLimit = Double(currentConfig["weekly-limit"]?.intValue ?? 100)
+
             var data = ClaudeUsageData()
-            data.fiveHourPercentage = (response.fiveHour?.utilization ?? 0) / 100
+            data.fiveHourPercentage = (response.fiveHour?.utilization ?? 0) / fiveHourLimit
             data.fiveHourResetDate = response.fiveHour.flatMap { isoFormatter.date(from: $0.resetsAt) }
-            data.weeklyPercentage = (response.sevenDay?.utilization ?? 0) / 100
+            data.weeklyPercentage = (response.sevenDay?.utilization ?? 0) / weeklyLimit
             data.weeklyResetDate = response.sevenDay.flatMap { isoFormatter.date(from: $0.resetsAt) }
             data.plan = plan.capitalized
             data.lastUpdated = Date()
