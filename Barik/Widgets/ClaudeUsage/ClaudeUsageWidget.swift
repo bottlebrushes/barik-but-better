@@ -72,11 +72,11 @@ struct ClaudeUsageWidget: View {
                 .resizable()
                 .renderingMode(.template)
                 .scaledToFit()
-                .foregroundStyle(.white)
+                .foregroundStyle(.white.opacity(0.3))
                 .frame(width: iconSize, height: iconSize)
 
             Rectangle()
-                .fill(claudeOrange)
+                .fill(.white)
                 .frame(width: iconSize, height: iconSize * weeklyRemaining)
                 .frame(width: iconSize, height: iconSize, alignment: .bottom)
                 .animation(.easeOut(duration: 0.8), value: weeklyRemaining)

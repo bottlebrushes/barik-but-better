@@ -89,9 +89,6 @@ final class ConfigManager: ObservableObject {
             window.title.max-length = 50
 
             [widgets.default.claude-usage]
-            plan = "pro"
-            five-hour-limit = 80
-            weekly-limit = 500
 
             [widgets.default.battery]
             show-percentage = true
