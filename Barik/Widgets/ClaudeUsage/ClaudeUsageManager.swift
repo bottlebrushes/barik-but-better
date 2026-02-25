@@ -98,15 +98,14 @@ final class ClaudeUsageManager: ObservableObject {
     }
 
     private func handleWake() {
-        guard isConnected, cachedCredentials != nil else { return }
-        // Restart the timer since sleep may have disrupted it
+        guard isConnected else { return }
         refreshTimer?.invalidate()
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.fetchData()
-            }
+        // Delay briefly to allow the network stack to reconnect after sleep,
+        // then re-read keychain credentials (the token may have been refreshed).
+        Task {
+            try? await Task.sleep(for: .seconds(2))
+            connectAndFetch()
         }
-        fetchData()
     }
 
     private func connectAndFetch() {
