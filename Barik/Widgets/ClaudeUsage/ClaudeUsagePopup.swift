@@ -28,6 +28,8 @@ struct ClaudeUsagePopup: View {
                 )
                 Divider().background(Color.white.opacity(0.2))
                 footerSection
+            } else if usageManager.fetchFailed {
+                errorView
             } else {
                 loadingView
             }
@@ -240,5 +242,45 @@ struct ClaudeUsagePopup: View {
         }
         .frame(maxWidth: .infinity)
         .padding(40)
+    }
+
+    // MARK: - Error
+
+    private var errorView: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 24))
+                .opacity(0.5)
+
+            Text("Unable to load usage data")
+                .font(.system(size: 12, weight: .medium))
+
+            Text("The request failed. Your token may have expired.")
+                .font(.system(size: 11))
+                .opacity(0.5)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Button(action: {
+                usageManager.refresh()
+            }) {
+                Text("Retry")
+                    .font(.system(size: 12, weight: .medium))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(Color(red: 0.89, green: 0.45, blue: 0.29))
+            .onHover { hovering in
+                if hovering {
+                    NSCursor.pointingHand.push()
+                } else {
+                    NSCursor.pop()
+                }
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 30)
+        .padding(.vertical, 30)
     }
 }
