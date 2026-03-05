@@ -46,6 +46,7 @@ final class ClaudeUsageManager: ObservableObject {
 
     @Published private(set) var usageData = ClaudeUsageData()
     @Published private(set) var isConnected: Bool = false
+    @Published private(set) var fetchFailed: Bool = false
 
     private var refreshTimer: Timer?
     private var cachedCredentials: (accessToken: String, plan: String)?
@@ -84,6 +85,7 @@ final class ClaudeUsageManager: ObservableObject {
     }
 
     func refresh() {
+        fetchFailed = false
         if cachedCredentials == nil {
             connectAndFetch()
         } else {
@@ -137,7 +139,10 @@ final class ClaudeUsageManager: ObservableObject {
         let plan = currentConfig["plan"]?.stringValue ?? creds.plan
 
         Task {
-            guard let response = await fetchUsageFromAPI(token: creds.accessToken) else { return }
+            guard let response = await fetchUsageFromAPI(token: creds.accessToken) else {
+                self.fetchFailed = true
+                return
+            }
 
             let isoFormatter = ISO8601DateFormatter()
             isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -151,6 +156,7 @@ final class ClaudeUsageManager: ObservableObject {
             data.lastUpdated = Date()
             data.isAvailable = true
 
+            self.fetchFailed = false
             self.usageData = data
         }
     }
