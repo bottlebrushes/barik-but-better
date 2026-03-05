@@ -223,7 +223,7 @@ class YabaiSpacesProvider: SpacesProvider, SwitchableSpacesProvider, EventBasedS
             !($0.isHidden || $0.isFloating || $0.isSticky)
         }
         var spaceDict = Dictionary(
-            uniqueKeysWithValues: spaces.map { ($0.id, $0) })
+            spaces.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
         for window in filteredWindows {
             if var space = spaceDict[window.spaceId] {
                 space.windows.append(window)
