@@ -53,6 +53,7 @@ final class ClaudeUsageManager: ObservableObject {
     private var currentConfig: ConfigData = [:]
 
     private static let connectedKey = "claude-usage-connected"
+    private static let refreshInterval: TimeInterval = 120
 
     private init() {
         NSWorkspace.shared.notificationCenter.addObserver(
@@ -86,11 +87,8 @@ final class ClaudeUsageManager: ObservableObject {
 
     func refresh() {
         fetchFailed = false
-        if cachedCredentials == nil {
-            connectAndFetch()
-        } else {
-            fetchData()
-        }
+        // Re-read keychain on manual retry — the token may have been refreshed by Claude Code.
+        connectAndFetch()
     }
 
     /// Called when user explicitly clicks "Allow Access" in the popup.
@@ -124,7 +122,7 @@ final class ClaudeUsageManager: ObservableObject {
         fetchData()
 
         refreshTimer?.invalidate()
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: Self.refreshInterval, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.fetchData()
             }
@@ -139,7 +137,9 @@ final class ClaudeUsageManager: ObservableObject {
         let plan = currentConfig["plan"]?.stringValue ?? creds.plan
 
         Task {
-            guard let response = await fetchUsageFromAPI(token: creds.accessToken) else {
+            let response = await fetchUsageWithRetry(token: creds.accessToken)
+
+            guard let response else {
                 self.fetchFailed = true
                 return
             }
@@ -163,20 +163,58 @@ final class ClaudeUsageManager: ObservableObject {
 
     // MARK: - API
 
-    private func fetchUsageFromAPI(token: String) async -> UsageResponse? {
-        guard let url = URL(string: "https://api.anthropic.com/api/oauth/usage") else { return nil }
+    private func fetchUsageWithRetry(token: String) async -> UsageResponse? {
+        // Try up to 2 times: initial + 1 retry if rate-limited.
+        for attempt in 0..<2 {
+            let result = await fetchUsageFromAPI(token: token)
+            switch result {
+            case .success(let response):
+                return response
+            case .rateLimited(let retryAfter):
+                guard attempt == 0, retryAfter > 0, retryAfter <= 180 else { return nil }
+                try? await Task.sleep(for: .seconds(retryAfter))
+                continue
+            case .failed:
+                return nil
+            }
+        }
+        return nil
+    }
+
+    private enum FetchResult {
+        case success(UsageResponse)
+        case rateLimited(retryAfter: Int)
+        case failed
+    }
+
+    private func fetchUsageFromAPI(token: String) async -> FetchResult {
+        guard let url = URL(string: "https://api.anthropic.com/api/oauth/usage") else { return .failed }
 
         var request = URLRequest(url: url)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
-        request.timeoutInterval = 5
+        request.setValue("claude-code/2.1.69", forHTTPHeaderField: "User-Agent")
+        request.timeoutInterval = 10
 
-        guard let (data, response) = try? await URLSession.shared.data(for: request),
-              let http = response as? HTTPURLResponse,
-              http.statusCode == 200 else { return nil }
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else { return .failed }
 
-        return try? JSONDecoder().decode(UsageResponse.self, from: data)
+            if http.statusCode == 429 {
+                let retryAfter = http.value(forHTTPHeaderField: "retry-after")
+                    .flatMap(Int.init) ?? 0
+                return .rateLimited(retryAfter: retryAfter)
+            }
+            guard http.statusCode == 200 else { return .failed }
+
+            if let decoded = try? JSONDecoder().decode(UsageResponse.self, from: data) {
+                return .success(decoded)
+            }
+            return .failed
+        } catch {
+            return .failed
+        }
     }
 
     // MARK: - Keychain
