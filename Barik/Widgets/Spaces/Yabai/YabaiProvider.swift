@@ -16,13 +16,14 @@ class YabaiSpacesProvider: SpacesProvider, SwitchableSpacesProvider, EventBasedS
     private var socketPath = "/tmp/barik-yabai.sock"
     private var isObserving = false
     private var socketQueue = DispatchQueue(label: "com.barik.yabai.socket", qos: .userInitiated)
+    private var refreshQueue = DispatchQueue(label: "com.barik.yabai.refresh", qos: .userInitiated)
 
     func startObserving() {
         guard !isObserving else { return }
         isObserving = true
 
         // Send initial state asynchronously to avoid blocking main thread
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        refreshQueue.async { [weak self] in
             guard let self = self else { return }
             if let spaces = self.getSpacesWithWindows() {
                 let anySpaces = spaces.map { AnySpace($0) }
@@ -122,15 +123,8 @@ class YabaiSpacesProvider: SpacesProvider, SwitchableSpacesProvider, EventBasedS
             }
 
         case "window_focused", "window_created", "window_destroyed", "window_moved":
-            // For window events, refresh the windows for affected space
-            if let spaceIdStr = data, let spaces = getSpacesWithWindows() {
-                if let space = spaces.first(where: { String($0.id) == spaceIdStr }) {
-                    let windows = space.windows.map { AnyWindow($0) }
-                    spacesSubject.send(.windowsUpdated(spaceIdStr, windows))
-                }
-            } else {
-                refreshSpaces()
-            }
+            // For window events, refresh via serial queue to avoid concurrent getSpacesWithWindows calls
+            refreshSpaces()
 
         case "space_created":
             if let spaceId = data {
@@ -153,7 +147,7 @@ class YabaiSpacesProvider: SpacesProvider, SwitchableSpacesProvider, EventBasedS
     }
 
     private func refreshSpaces() {
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        refreshQueue.async { [weak self] in
             guard let self = self else { return }
             if let spaces = self.getSpacesWithWindows() {
                 let anySpaces = spaces.map { AnySpace($0) }
@@ -222,8 +216,10 @@ class YabaiSpacesProvider: SpacesProvider, SwitchableSpacesProvider, EventBasedS
         let filteredWindows = windows.filter {
             !($0.isHidden || $0.isFloating || $0.isSticky)
         }
-        var spaceDict = Dictionary(
-            spaces.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
+        var spaceDict = [Int: YabaiSpace]()
+        for space in spaces {
+            spaceDict[space.id] = space
+        }
         for window in filteredWindows {
             if var space = spaceDict[window.spaceId] {
                 space.windows.append(window)
@@ -241,9 +237,10 @@ class YabaiSpacesProvider: SpacesProvider, SwitchableSpacesProvider, EventBasedS
         _ = runYabaiCommand(arguments: ["-m", "space", "--focus", spaceId])
         if !needWindowFocus { return }
 
-        DispatchQueue.global(qos: .userInitiated).asyncAfter(
+        refreshQueue.asyncAfter(
             deadline: .now() + 0.1
-        ) {
+        ) { [weak self] in
+            guard let self = self else { return }
             if let spaces = self.getSpacesWithWindows() {
                 if let space = spaces.first(where: { $0.id == Int(spaceId) }) {
                     let hasFocused = space.windows.contains { $0.isFocused }
