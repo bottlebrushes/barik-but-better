@@ -29,7 +29,7 @@ private struct UsageResponse: Codable {
 
     struct UsageBucket: Codable {
         let utilization: Double
-        let resetsAt: String
+        let resetsAt: String?
 
         enum CodingKeys: String, CodingKey {
             case utilization
@@ -47,6 +47,7 @@ final class ClaudeUsageManager: ObservableObject {
     @Published private(set) var usageData = ClaudeUsageData()
     @Published private(set) var isConnected: Bool = false
     @Published private(set) var fetchFailed: Bool = false
+    @Published private(set) var errorMessage: String?
 
     private var refreshTimer: Timer?
     private var cachedCredentials: (accessToken: String, plan: String)?
@@ -87,6 +88,7 @@ final class ClaudeUsageManager: ObservableObject {
 
     func refresh() {
         fetchFailed = false
+        errorMessage = nil
         // Re-read keychain on manual retry — the token may have been refreshed by Claude Code.
         connectAndFetch()
     }
@@ -112,6 +114,7 @@ final class ClaudeUsageManager: ObservableObject {
         guard let creds = readKeychainCredentials() else {
             isConnected = false
             cachedCredentials = nil
+            errorMessage = nil
             UserDefaults.standard.set(false, forKey: Self.connectedKey)
             return
         }
@@ -137,48 +140,59 @@ final class ClaudeUsageManager: ObservableObject {
         let plan = currentConfig["plan"]?.stringValue ?? creds.plan
 
         Task {
-            let response = await fetchUsageWithRetry(token: creds.accessToken)
+            let result = await fetchUsageWithRetry(token: creds.accessToken)
 
-            guard let response else {
+            switch result {
+            case .success(let response):
+                let isoFormatter = ISO8601DateFormatter()
+                isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+
+                var data = ClaudeUsageData()
+                data.fiveHourPercentage = (response.fiveHour?.utilization ?? 0) / 100
+                data.fiveHourResetDate = response.fiveHour.flatMap { bucket in
+                    bucket.resetsAt.flatMap { isoFormatter.date(from: $0) }
+                }
+                data.weeklyPercentage = (response.sevenDay?.utilization ?? 0) / 100
+                data.weeklyResetDate = response.sevenDay.flatMap { bucket in
+                    bucket.resetsAt.flatMap { isoFormatter.date(from: $0) }
+                }
+                data.plan = plan.capitalized
+                data.lastUpdated = Date()
+                data.isAvailable = true
+
+                self.fetchFailed = false
+                self.errorMessage = nil
+                self.usageData = data
+
+            case .rateLimited:
                 self.fetchFailed = true
-                return
+                self.errorMessage = "Claude is rate limiting usage checks right now. Try again later."
+
+            case .failed:
+                self.fetchFailed = true
+                self.errorMessage = "The request failed. Your token may have expired."
             }
-
-            let isoFormatter = ISO8601DateFormatter()
-            isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-
-            var data = ClaudeUsageData()
-            data.fiveHourPercentage = (response.fiveHour?.utilization ?? 0) / 100
-            data.fiveHourResetDate = response.fiveHour.flatMap { isoFormatter.date(from: $0.resetsAt) }
-            data.weeklyPercentage = (response.sevenDay?.utilization ?? 0) / 100
-            data.weeklyResetDate = response.sevenDay.flatMap { isoFormatter.date(from: $0.resetsAt) }
-            data.plan = plan.capitalized
-            data.lastUpdated = Date()
-            data.isAvailable = true
-
-            self.fetchFailed = false
-            self.usageData = data
         }
     }
 
     // MARK: - API
 
-    private func fetchUsageWithRetry(token: String) async -> UsageResponse? {
+    private func fetchUsageWithRetry(token: String) async -> FetchResult {
         // Try up to 2 times: initial + 1 retry if rate-limited.
         for attempt in 0..<2 {
             let result = await fetchUsageFromAPI(token: token)
             switch result {
-            case .success(let response):
-                return response
+            case .success:
+                return result
             case .rateLimited(let retryAfter):
-                guard attempt == 0, retryAfter > 0, retryAfter <= 180 else { return nil }
+                guard attempt == 0, retryAfter > 0, retryAfter <= 180 else { return .rateLimited(retryAfter: retryAfter) }
                 try? await Task.sleep(for: .seconds(retryAfter))
                 continue
             case .failed:
-                return nil
+                return .failed
             }
         }
-        return nil
+        return .failed
     }
 
     private enum FetchResult {

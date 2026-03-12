@@ -74,6 +74,7 @@ final class ConfigManager: ObservableObject {
                 "default.spaces",
                 "spacer",
                 "default.claude-usage",
+                "default.codex-usage",
                 "default.nowplaying",
                 "default.network",
                 "default.battery",
@@ -89,6 +90,8 @@ final class ConfigManager: ObservableObject {
             window.title.max-length = 50
 
             [widgets.default.claude-usage]
+
+            [widgets.default.codex-usage]
 
             [widgets.default.battery]
             show-percentage = true

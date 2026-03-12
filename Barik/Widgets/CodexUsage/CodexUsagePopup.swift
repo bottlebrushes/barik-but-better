@@ -1,8 +1,8 @@
 import SwiftUI
 
-struct ClaudeUsagePopup: View {
+struct CodexUsagePopup: View {
     @EnvironmentObject var configProvider: ConfigProvider
-    @ObservedObject private var usageManager = ClaudeUsageManager.shared
+    @ObservedObject private var usageManager = CodexUsageManager.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -13,25 +13,17 @@ struct ClaudeUsagePopup: View {
                 Divider().background(Color.white.opacity(0.2))
                 rateLimitSection(
                     icon: "clock",
-                    title: "5-Hour Window",
-                    percentage: usageManager.usageData.fiveHourPercentage,
-                    resetDate: usageManager.usageData.fiveHourResetDate,
+                    title: windowTitle(for: usageManager.usageData.primaryWindowMinutes),
+                    percentage: usageManager.usageData.primaryPercentage,
+                    resetDate: usageManager.usageData.primaryResetDate,
                     resetPrefix: "Resets in"
-                )
-                Divider().background(Color.white.opacity(0.2))
-                rateLimitSection(
-                    icon: "calendar",
-                    title: "Weekly",
-                    percentage: usageManager.usageData.weeklyPercentage,
-                    resetDate: usageManager.usageData.weeklyResetDate,
-                    resetPrefix: "Resets"
                 )
                 Divider().background(Color.white.opacity(0.2))
                 footerSection
             } else if usageManager.fetchFailed {
                 errorView
             } else {
-                loadingView
+                emptyView
             }
         }
         .frame(width: 280)
@@ -45,11 +37,11 @@ struct ClaudeUsagePopup: View {
 
     private var titleBar: some View {
         HStack(spacing: 8) {
-            Image("ClaudeIcon")
+            Image("CodexIcon")
                 .resizable()
                 .scaledToFit()
                 .frame(width: 18, height: 18)
-            Text("Claude Usage")
+            Text("Codex Usage")
                 .font(.system(size: 14, weight: .semibold))
             Spacer()
             Text(usageManager.usageData.plan)
@@ -67,10 +59,11 @@ struct ClaudeUsagePopup: View {
     private var planBadgeColor: Color {
         switch usageManager.usageData.plan.lowercased() {
         case "pro": return .orange
-        case "max": return .purple
+        case "plus": return .green
         case "team": return .blue
+        case "business", "enterprise": return .purple
         case "free": return .gray
-        default: return .orange
+        default: return .blue
         }
     }
 
@@ -145,29 +138,54 @@ struct ClaudeUsagePopup: View {
         }
     }
 
+    private func windowTitle(for minutes: Int) -> String {
+        guard minutes > 0 else { return "Usage Window" }
+
+        if minutes % 1_440 == 0 {
+            let days = minutes / 1_440
+            return "\(days)-Day Window"
+        }
+
+        if minutes % 60 == 0 {
+            let hours = minutes / 60
+            return "\(hours)-Hour Window"
+        }
+
+        return "\(minutes)-Minute Window"
+    }
+
     // MARK: - Footer
 
     private var footerSection: some View {
-        HStack {
-            Text("Updated \(timeAgoString(usageManager.usageData.lastUpdated))")
+        VStack(alignment: .leading, spacing: 3) {
+            Text("Usage updated \(timeAgoString(usageManager.usageData.lastUpdated))")
                 .font(.system(size: 11))
                 .opacity(0.4)
 
-            Spacer()
-
-            Button(action: {
-                usageManager.refresh()
-            }) {
-                Image(systemName: "arrow.clockwise")
-                    .font(.system(size: 12))
-                    .opacity(0.6)
+            if let activityDate = usageManager.usageData.lastActivityDate,
+               activityDate.timeIntervalSince(usageManager.usageData.lastUpdated) > 60 {
+                Text("Codex active \(timeAgoString(activityDate))")
+                    .font(.system(size: 10))
+                    .opacity(0.3)
             }
-            .buttonStyle(.plain)
-            .onHover { hovering in
-                if hovering {
-                    NSCursor.pointingHand.push()
-                } else {
-                    NSCursor.pop()
+
+            HStack {
+                Spacer()
+
+                Button(action: {
+                    usageManager.refresh()
+                }) {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 12))
+                        .opacity(0.6)
+                }
+                .buttonStyle(.plain)
+                .onHover { hovering in
+                    if hovering {
+                        NSCursor.pointingHand.push()
+                    } else {
+                        NSCursor.pop()
+                    }
                 }
             }
         }
@@ -187,30 +205,30 @@ struct ClaudeUsagePopup: View {
 
     private var connectView: some View {
         VStack(spacing: 14) {
-            Image("ClaudeIcon")
+            Image("CodexIcon")
                 .resizable()
                 .scaledToFit()
                 .frame(width: 28, height: 28)
 
-            Text("Claude Usage")
+            Text("Codex Usage")
                 .font(.system(size: 14, weight: .semibold))
 
-            Text("View your Claude rate limit usage directly in the menu bar.")
+            Text("Sign in to Codex to view your rate-limit usage directly in the menu bar.")
                 .font(.system(size: 11))
                 .opacity(0.5)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
 
             Button(action: {
-                usageManager.requestAccess()
+                usageManager.refresh()
             }) {
-                Text("Allow Access")
+                Text("Check Again")
                     .font(.system(size: 12, weight: .medium))
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 6)
             }
             .buttonStyle(.borderedProminent)
-            .tint(Color(red: 0.89, green: 0.45, blue: 0.29))
+            .tint(.blue)
             .onHover { hovering in
                 if hovering {
                     NSCursor.pointingHand.push()
@@ -219,7 +237,7 @@ struct ClaudeUsagePopup: View {
                 }
             }
 
-            Text("Reads credentials from your Claude Code keychain entry.")
+            Text("Reads `~/.codex/auth.json` and the latest Codex session rate-limit snapshot.")
                 .font(.system(size: 10))
                 .opacity(0.3)
                 .multilineTextAlignment(.center)
@@ -230,18 +248,50 @@ struct ClaudeUsagePopup: View {
         .padding(.vertical, 30)
     }
 
-    // MARK: - Loading
+    // MARK: - Empty
 
-    private var loadingView: some View {
-        VStack(spacing: 12) {
-            ProgressView()
-                .scaleEffect(0.8)
-            Text("Loading usage data...")
+    private var emptyView: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "chart.pie")
+                .font(.system(size: 24))
+                .opacity(0.5)
+
+            Text("No usage data yet")
+                .font(.system(size: 12, weight: .medium))
+
+            Text("Run a Codex task first. The widget reads the latest non-empty rate-limit snapshot from your local Codex sessions.")
                 .font(.system(size: 11))
                 .opacity(0.5)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if let activityDate = usageManager.usageData.lastActivityDate {
+                Text("Latest Codex activity \(timeAgoString(activityDate))")
+                    .font(.system(size: 10))
+                    .opacity(0.35)
+            }
+
+            Button(action: {
+                usageManager.refresh()
+            }) {
+                Text("Refresh")
+                    .font(.system(size: 12, weight: .medium))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.blue)
+            .onHover { hovering in
+                if hovering {
+                    NSCursor.pointingHand.push()
+                } else {
+                    NSCursor.pop()
+                }
+            }
         }
         .frame(maxWidth: .infinity)
-        .padding(40)
+        .padding(.horizontal, 30)
+        .padding(.vertical, 30)
     }
 
     // MARK: - Error
@@ -255,7 +305,7 @@ struct ClaudeUsagePopup: View {
             Text("Unable to load usage data")
                 .font(.system(size: 12, weight: .medium))
 
-            Text(usageManager.errorMessage ?? "The request failed. Your token may have expired.")
+            Text("Reading local Codex auth or session files failed.")
                 .font(.system(size: 11))
                 .opacity(0.5)
                 .multilineTextAlignment(.center)
@@ -270,7 +320,7 @@ struct ClaudeUsagePopup: View {
                     .padding(.vertical, 6)
             }
             .buttonStyle(.borderedProminent)
-            .tint(Color(red: 0.89, green: 0.45, blue: 0.29))
+            .tint(.blue)
             .onHover { hovering in
                 if hovering {
                     NSCursor.pointingHand.push()

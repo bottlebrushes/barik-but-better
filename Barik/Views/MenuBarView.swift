@@ -82,10 +82,11 @@ struct MenuBarView: View {
 
     @ViewBuilder
     private func buildView(for item: TomlWidgetItem) -> some View {
+        let widgetID = normalizedWidgetID(item.id)
         let config = ConfigProvider(
-            config: configManager.resolvedWidgetConfig(for: item))
+            config: configManager.globalWidgetConfig(for: widgetID).merging(item.inlineParams) { _, inline in inline })
 
-        switch item.id {
+        switch widgetID {
         case "default.spaces":
             SpacesWidget().environmentObject(config)
 
@@ -111,6 +112,10 @@ struct MenuBarView: View {
             ClaudeUsageWidget()
                 .environmentObject(config)
 
+        case "default.codex-usage":
+            CodexUsageWidget()
+                .environmentObject(config)
+
         case "default.pomodoro":
             PomodoroWidget()
                 .environmentObject(config)
@@ -132,8 +137,19 @@ struct MenuBarView: View {
             SystemBannerWidget()
 
         default:
-            Text("?\(item.id)?").foregroundColor(.red)
+            Text("?\(widgetID)?").foregroundColor(.red)
         }
+    }
+
+    private func normalizedWidgetID(_ rawValue: String) -> String {
+        return String(
+            rawValue.unicodeScalars.filter { scalar in
+                CharacterSet.alphanumerics.contains(scalar)
+                    || scalar == "."
+                    || scalar == "-"
+                    || scalar == "_"
+            }
+        )
     }
 }
 

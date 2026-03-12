@@ -9,6 +9,7 @@ final class MenuBarContextMenu: NSMenu, NSMenuDelegate {
         ("default.nowplaying", "Now Playing"),
         ("default.weather", "Weather"),
         ("default.claude-usage", "Claude Usage"),
+        ("default.codex-usage", "Codex Usage"),
         ("default.pomodoro", "Pomodoro"),
         ("default.countdown", "Countdown"),
     ]
