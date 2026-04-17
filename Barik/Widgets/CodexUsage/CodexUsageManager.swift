@@ -3,6 +3,7 @@ import SwiftUI
 
 private let codexUsageAccountFingerprintKey = "codex-usage-account-fingerprint"
 private let codexUsageAcceptedRefreshKey = "codex-usage-accepted-auth-refresh"
+private let codexUsageConnectedKey = "codex-usage-connected"
 
 // MARK: - Data Models
 
@@ -10,6 +11,9 @@ struct CodexUsageData {
     var primaryPercentage: Double = 0
     var primaryResetDate: Date?
     var primaryWindowMinutes: Int = 0
+    var secondaryPercentage: Double = 0
+    var secondaryResetDate: Date?
+    var secondaryWindowMinutes: Int = 0
 
     var plan: String = "ChatGPT"
     var lastUpdated: Date = Date()
@@ -78,6 +82,17 @@ private enum CodexUsageLoadState {
     case failed
 }
 
+private struct CodexUsageRefreshResult {
+    let loadState: CodexUsageLoadState
+    let watchPaths: [String]
+}
+
+private enum CodexAuthReadResult {
+    case missing
+    case loaded(CodexAuthState)
+    case unreadable
+}
+
 private struct CodexAuthState {
     let plan: String
     let accountID: String?
@@ -111,11 +126,20 @@ final class CodexUsageManager: ObservableObject {
     @Published private(set) var fetchFailed: Bool = false
 
     private var refreshTimer: Timer?
+    private var fileWatchSources: [DispatchSourceFileSystemObject] = []
+    private var watchedPaths = Set<String>()
+    private var pendingRefreshWorkItem: DispatchWorkItem?
     private var currentConfig: ConfigData = [:]
+    private var isFetchInFlight = false
+    private var queuedRefresh = false
 
     private static let refreshInterval: TimeInterval = 30
+    private static let authMissingGraceInterval: TimeInterval = 300
+    private static let fileWatchDebounceInterval: TimeInterval = 1
 
     private init() {
+        isConnected = UserDefaults.standard.bool(forKey: codexUsageConnectedKey)
+
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification,
             object: nil,
@@ -139,6 +163,9 @@ final class CodexUsageManager: ObservableObject {
     func stopUpdating() {
         refreshTimer?.invalidate()
         refreshTimer = nil
+        pendingRefreshWorkItem?.cancel()
+        pendingRefreshWorkItem = nil
+        stopWatchingFiles()
     }
 
     func refresh() {
@@ -155,47 +182,139 @@ final class CodexUsageManager: ObservableObject {
     }
 
     private func connectAndFetch() {
+        if isFetchInFlight {
+            queuedRefresh = true
+            return
+        }
+
+        isFetchInFlight = true
         let planOverride = currentConfig["plan"]?.stringValue
 
         Task {
-            let loadState = await Task.detached(priority: .utility) {
-                Self.loadUsage(planOverride: planOverride)
+            let result = await Task.detached(priority: .utility) {
+                let codexHome = FileManager.default.homeDirectoryForCurrentUser
+                    .appendingPathComponent(".codex", isDirectory: true)
+                let authURL = codexHome.appendingPathComponent("auth.json")
+                let sessionsURL = codexHome.appendingPathComponent("sessions", isDirectory: true)
+
+                return CodexUsageRefreshResult(
+                    loadState: Self.loadUsage(planOverride: planOverride),
+                    watchPaths: Self.watchPaths(codexHome: codexHome, authURL: authURL, sessionsURL: sessionsURL)
+                )
             }.value
 
-            switch loadState {
+            self.updateWatchedPaths(result.watchPaths)
+
+            switch result.loadState {
             case .disconnected:
-                self.isConnected = false
-                self.fetchFailed = false
-                self.usageData = CodexUsageData()
-                self.stopUpdating()
+                if self.shouldRetainUsageStateOnDisconnect() {
+                    self.isConnected = true
+                    self.fetchFailed = false
+                    self.scheduleRefreshTimer()
+                } else {
+                    self.isConnected = false
+                    self.fetchFailed = false
+                    self.usageData = CodexUsageData()
+                    UserDefaults.standard.set(false, forKey: codexUsageConnectedKey)
+                    self.scheduleRefreshTimer()
+                }
 
             case .connectedWithoutSnapshot(let data):
                 self.isConnected = true
                 self.fetchFailed = false
-                self.usageData = data
+                UserDefaults.standard.set(true, forKey: codexUsageConnectedKey)
+                if self.usageData.isAvailable {
+                    self.usageData.lastActivityDate = data.lastActivityDate
+                    self.usageData.plan = data.plan
+                } else {
+                    self.usageData = data
+                }
                 self.scheduleRefreshTimer()
 
             case .connected(let data):
                 self.isConnected = true
                 self.fetchFailed = false
                 self.usageData = data
+                UserDefaults.standard.set(true, forKey: codexUsageConnectedKey)
                 self.scheduleRefreshTimer()
 
             case .failed:
-                self.isConnected = true
-                self.fetchFailed = true
+                self.isConnected = self.isConnected || UserDefaults.standard.bool(forKey: codexUsageConnectedKey)
+                self.fetchFailed = !self.usageData.isAvailable
                 self.scheduleRefreshTimer()
+            }
+
+            self.isFetchInFlight = false
+            if self.queuedRefresh {
+                self.queuedRefresh = false
+                self.scheduleDebouncedRefresh(delay: 0.2)
             }
         }
     }
 
     private func scheduleRefreshTimer() {
         refreshTimer?.invalidate()
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: Self.refreshInterval, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: Self.refreshInterval, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.connectAndFetch()
             }
         }
+        RunLoop.main.add(timer, forMode: .common)
+        refreshTimer = timer
+    }
+
+    private func scheduleDebouncedRefresh(delay: TimeInterval? = nil) {
+        pendingRefreshWorkItem?.cancel()
+        let refreshDelay = delay ?? Self.fileWatchDebounceInterval
+
+        let workItem = DispatchWorkItem { [weak self] in
+            Task { @MainActor in
+                self?.connectAndFetch()
+            }
+        }
+
+        pendingRefreshWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + refreshDelay, execute: workItem)
+    }
+
+    private func updateWatchedPaths(_ paths: [String]) {
+        let uniquePaths = Set(paths)
+        guard uniquePaths != watchedPaths else { return }
+
+        stopWatchingFiles()
+        watchedPaths = uniquePaths
+
+        for path in uniquePaths {
+            let fileDescriptor = open(path, O_EVTONLY)
+            guard fileDescriptor != -1 else { continue }
+
+            let source = DispatchSource.makeFileSystemObjectSource(
+                fileDescriptor: fileDescriptor,
+                eventMask: [.write, .delete, .rename, .extend, .attrib, .link, .revoke],
+                queue: DispatchQueue.global(qos: .utility)
+            )
+            source.setEventHandler { [weak self] in
+                Task { @MainActor in
+                    self?.scheduleDebouncedRefresh()
+                }
+            }
+            source.setCancelHandler {
+                close(fileDescriptor)
+            }
+            source.resume()
+            fileWatchSources.append(source)
+        }
+    }
+
+    private func stopWatchingFiles() {
+        fileWatchSources.forEach { $0.cancel() }
+        fileWatchSources.removeAll()
+        watchedPaths.removeAll()
+    }
+
+    private func shouldRetainUsageStateOnDisconnect() -> Bool {
+        guard usageData.isAvailable else { return false }
+        return Date().timeIntervalSince(usageData.lastUpdated) <= Self.authMissingGraceInterval
     }
 
     nonisolated private static func loadUsage(planOverride: String?) -> CodexUsageLoadState {
@@ -204,11 +323,23 @@ final class CodexUsageManager: ObservableObject {
         let authURL = codexHome.appendingPathComponent("auth.json")
         let sessionsURL = codexHome.appendingPathComponent("sessions", isDirectory: true)
 
-        guard let auth = readAuthState(from: authURL) else {
+        let authResult = readAuthState(from: authURL)
+        let auth: CodexAuthState
+
+        switch authResult {
+        case .missing:
             return .disconnected
+        case .unreadable:
+            return .failed
+        case .loaded(let loadedAuth):
+            auth = loadedAuth
         }
 
-        let plan = formatPlan(planOverride ?? auth.plan)
+        let plan = resolvedPlan(
+            override: planOverride,
+            snapshotPlan: nil,
+            authPlan: auth.plan
+        )
         let cutoffDate = accountSwitchCutoffDate(for: auth)
 
         let activity = latestTokenActivity(in: sessionsURL)
@@ -221,12 +352,20 @@ final class CodexUsageManager: ObservableObject {
 
         persistAccountFingerprintIfNeeded(auth)
 
-        let primaryPercentage = max(0, min(snapshot.bucket.usedPercent / 100, 1))
+        let primaryPercentage = bucketPercentage(snapshot.primary)
+        let secondaryPercentage = bucketPercentage(snapshot.secondary)
         let data = CodexUsageData(
             primaryPercentage: primaryPercentage,
-            primaryResetDate: Date(timeIntervalSince1970: snapshot.bucket.resetsAt),
-            primaryWindowMinutes: snapshot.bucket.windowMinutes,
-            plan: formatPlan(planOverride ?? snapshot.plan ?? auth.plan),
+            primaryResetDate: bucketResetDate(snapshot.primary),
+            primaryWindowMinutes: snapshot.primary?.windowMinutes ?? 0,
+            secondaryPercentage: secondaryPercentage,
+            secondaryResetDate: bucketResetDate(snapshot.secondary),
+            secondaryWindowMinutes: snapshot.secondary?.windowMinutes ?? 0,
+            plan: resolvedPlan(
+                override: planOverride,
+                snapshotPlan: snapshot.plan,
+                authPlan: auth.plan
+            ),
             lastUpdated: snapshot.timestamp,
             lastActivityDate: activity,
             isAvailable: true
@@ -234,12 +373,29 @@ final class CodexUsageManager: ObservableObject {
         return .connected(data: data)
     }
 
-    nonisolated private static func readAuthState(from authURL: URL) -> CodexAuthState? {
-        guard let data = try? Data(contentsOf: authURL),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return nil
+    nonisolated private static func readAuthState(from authURL: URL) -> CodexAuthReadResult {
+        var sawAuthFile = false
+
+        for attempt in 0..<3 {
+            if FileManager.default.fileExists(atPath: authURL.path) {
+                sawAuthFile = true
+
+                if let data = try? Data(contentsOf: authURL),
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let authState = decodeAuthState(from: json) {
+                    return .loaded(authState)
+                }
+            }
+
+            if attempt < 2 {
+                Thread.sleep(forTimeInterval: 0.2)
+            }
         }
 
+        return sawAuthFile ? .unreadable : .missing
+    }
+
+    nonisolated private static func decodeAuthState(from json: [String: Any]) -> CodexAuthState? {
         let authMode = json["auth_mode"] as? String
         if authMode == "apikey" || authMode == "api_key" {
             return CodexAuthState(
@@ -283,8 +439,8 @@ final class CodexUsageManager: ObservableObject {
         return nil
     }
 
-    nonisolated private static func latestUsageSnapshot(in sessionsURL: URL, after cutoffDate: Date?) -> (bucket: CodexSessionEvent.Bucket, plan: String?, timestamp: Date)? {
-        var latestSnapshot: (bucket: CodexSessionEvent.Bucket, plan: String?, timestamp: Date)?
+    nonisolated private static func latestUsageSnapshot(in sessionsURL: URL, after cutoffDate: Date?) -> (primary: CodexSessionEvent.Bucket?, secondary: CodexSessionEvent.Bucket?, plan: String?, timestamp: Date)? {
+        var latestSnapshot: (primary: CodexSessionEvent.Bucket?, secondary: CodexSessionEvent.Bucket?, plan: String?, timestamp: Date)?
 
         for fileURL in recentSessionFiles(in: sessionsURL) {
             guard let content = try? String(contentsOf: fileURL, encoding: .utf8) else {
@@ -300,8 +456,11 @@ final class CodexUsageManager: ObservableObject {
                       event.type == "event_msg",
                       event.payload.type == "token_count",
                       let rateLimits = event.payload.rateLimits,
-                      let bucket = rateLimits.primary,
                       let timestamp = parseTimestamp(event.timestamp) else {
+                    continue
+                }
+
+                if rateLimits.primary == nil, rateLimits.secondary == nil {
                     continue
                 }
 
@@ -314,7 +473,8 @@ final class CodexUsageManager: ObservableObject {
                 }
 
                 latestSnapshot = (
-                    bucket: bucket,
+                    primary: rateLimits.primary,
+                    secondary: rateLimits.secondary,
                     plan: rateLimits.planType,
                     timestamp: timestamp
                 )
@@ -410,12 +570,57 @@ final class CodexUsageManager: ObservableObject {
             .map { $0 }
     }
 
+    nonisolated private static func watchPaths(codexHome: URL, authURL: URL, sessionsURL: URL) -> [String] {
+        let fileManager = FileManager.default
+        let watchedSessionFileLimit = 8
+        var paths = Set<String>()
+
+        if fileManager.fileExists(atPath: codexHome.path) {
+            paths.insert(codexHome.path)
+        }
+
+        if fileManager.fileExists(atPath: authURL.path) {
+            paths.insert(authURL.path)
+        }
+
+        if fileManager.fileExists(atPath: sessionsURL.path) {
+            paths.insert(sessionsURL.path)
+        }
+
+        for fileURL in recentSessionFiles(in: sessionsURL).prefix(watchedSessionFileLimit) {
+            paths.insert(fileURL.path)
+
+            var directoryURL = fileURL.deletingLastPathComponent()
+            while directoryURL.path.hasPrefix(sessionsURL.path) {
+                paths.insert(directoryURL.path)
+
+                if directoryURL.path == sessionsURL.path {
+                    break
+                }
+
+                directoryURL.deleteLastPathComponent()
+            }
+        }
+
+        return Array(paths)
+    }
+
     nonisolated private static func decodeEvent(from line: Substring) -> CodexSessionEvent? {
         guard let data = String(line).data(using: .utf8) else {
             return nil
         }
 
         return try? JSONDecoder().decode(CodexSessionEvent.self, from: data)
+    }
+
+    nonisolated private static func bucketPercentage(_ bucket: CodexSessionEvent.Bucket?) -> Double {
+        guard let bucket else { return 0 }
+        return max(0, min(bucket.usedPercent / 100, 1))
+    }
+
+    nonisolated private static func bucketResetDate(_ bucket: CodexSessionEvent.Bucket?) -> Date? {
+        guard let bucket else { return nil }
+        return Date(timeIntervalSince1970: bucket.resetsAt)
     }
 
     nonisolated private static func parseTimestamp(_ rawValue: String) -> Date? {
@@ -466,6 +671,36 @@ final class CodexUsageManager: ObservableObject {
                 .replacingOccurrences(of: "-", with: " ")
                 .replacingOccurrences(of: "_", with: " ")
                 .capitalized
+        }
+    }
+
+    nonisolated private static func resolvedPlan(
+        override: String?,
+        snapshotPlan: String?,
+        authPlan: String
+    ) -> String {
+        if let override = normalizedPlanValue(override) {
+            return formatPlan(override)
+        }
+
+        if let snapshotPlan = normalizedPlanValue(snapshotPlan) {
+            return formatPlan(snapshotPlan)
+        }
+
+        return formatPlan(authPlan)
+    }
+
+    nonisolated private static func normalizedPlanValue(_ rawValue: String?) -> String? {
+        guard let rawValue else { return nil }
+
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        switch trimmed.lowercased() {
+        case "unknown", "null", "nil", "none":
+            return nil
+        default:
+            return trimmed
         }
     }
 }

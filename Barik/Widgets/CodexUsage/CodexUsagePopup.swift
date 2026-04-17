@@ -4,6 +4,10 @@ struct CodexUsagePopup: View {
     @EnvironmentObject var configProvider: ConfigProvider
     @ObservedObject private var usageManager = CodexUsageManager.shared
 
+    private var hasSecondaryWindow: Bool {
+        usageManager.usageData.secondaryWindowMinutes > 0
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if !usageManager.isConnected {
@@ -18,6 +22,16 @@ struct CodexUsagePopup: View {
                     resetDate: usageManager.usageData.primaryResetDate,
                     resetPrefix: "Resets in"
                 )
+                if hasSecondaryWindow {
+                    Divider().background(Color.white.opacity(0.2))
+                    rateLimitSection(
+                        icon: "calendar",
+                        title: windowTitle(for: usageManager.usageData.secondaryWindowMinutes),
+                        percentage: usageManager.usageData.secondaryPercentage,
+                        resetDate: usageManager.usageData.secondaryResetDate,
+                        resetPrefix: "Resets"
+                    )
+                }
                 Divider().background(Color.white.opacity(0.2))
                 footerSection
             } else if usageManager.fetchFailed {
@@ -140,6 +154,7 @@ struct CodexUsagePopup: View {
 
     private func windowTitle(for minutes: Int) -> String {
         guard minutes > 0 else { return "Usage Window" }
+        if minutes == 10_080 { return "Weekly" }
 
         if minutes % 1_440 == 0 {
             let days = minutes / 1_440

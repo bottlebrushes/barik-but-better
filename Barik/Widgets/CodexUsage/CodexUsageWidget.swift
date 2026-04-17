@@ -10,8 +10,16 @@ struct CodexUsageWidget: View {
         usageManager.usageData.primaryPercentage
     }
 
-    private var remainingPercentage: Double {
-        max(0, min(1, 1 - percentage))
+    private var weeklyPercentage: Double {
+        let usageData = usageManager.usageData
+        if usageData.secondaryWindowMinutes > 0 {
+            return usageData.secondaryPercentage
+        }
+        return usageData.primaryPercentage
+    }
+
+    private var weeklyRemaining: Double {
+        max(0, min(1, 1 - weeklyPercentage))
     }
 
     private var ringColor: Color {
@@ -76,10 +84,10 @@ struct CodexUsageWidget: View {
                 .frame(width: iconSize, height: iconSize)
                 .mask(
                     Rectangle()
-                        .frame(width: iconSize, height: iconSize * remainingPercentage)
+                        .frame(width: iconSize, height: iconSize * weeklyRemaining)
                         .frame(width: iconSize, height: iconSize, alignment: .bottom)
                 )
-                .animation(.easeOut(duration: 0.8), value: remainingPercentage)
+                .animation(.easeOut(duration: 0.8), value: weeklyRemaining)
         }
     }
 }
