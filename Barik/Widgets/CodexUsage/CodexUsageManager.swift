@@ -37,12 +37,16 @@ private struct CodexSessionEvent: Decodable {
     }
 
     struct RateLimits: Decodable {
+        let limitID: String?
+        let limitName: String?
         let primary: Bucket?
         let secondary: Bucket?
         let credits: Credits?
         let planType: String?
 
         enum CodingKeys: String, CodingKey {
+            case limitID = "limit_id"
+            case limitName = "limit_name"
             case primary
             case secondary
             case credits
@@ -132,9 +136,10 @@ final class CodexUsageManager: ObservableObject {
     private var currentConfig: ConfigData = [:]
     private var isFetchInFlight = false
     private var queuedRefresh = false
+    private var sourceUnavailableSince: Date?
 
     private static let refreshInterval: TimeInterval = 30
-    private static let authMissingGraceInterval: TimeInterval = 300
+    private static let sourceUnavailableGraceInterval: TimeInterval = 300
     private static let fileWatchDebounceInterval: TimeInterval = 1
 
     private init() {
@@ -204,14 +209,18 @@ final class CodexUsageManager: ObservableObject {
             }.value
 
             self.updateWatchedPaths(result.watchPaths)
+            let persistedConnected = UserDefaults.standard.bool(forKey: codexUsageConnectedKey)
+            let wasConnectedBefore = self.isConnected || persistedConnected
+            let now = Date()
 
             switch result.loadState {
             case .disconnected:
-                if self.shouldRetainUsageStateOnDisconnect() {
+                if self.shouldPreserveStateDuringSourceLoss(now: now, wasConnectedBefore: wasConnectedBefore) {
                     self.isConnected = true
                     self.fetchFailed = false
                     self.scheduleRefreshTimer()
                 } else {
+                    self.sourceUnavailableSince = nil
                     self.isConnected = false
                     self.fetchFailed = false
                     self.usageData = CodexUsageData()
@@ -220,6 +229,7 @@ final class CodexUsageManager: ObservableObject {
                 }
 
             case .connectedWithoutSnapshot(let data):
+                self.sourceUnavailableSince = nil
                 self.isConnected = true
                 self.fetchFailed = false
                 UserDefaults.standard.set(true, forKey: codexUsageConnectedKey)
@@ -232,6 +242,7 @@ final class CodexUsageManager: ObservableObject {
                 self.scheduleRefreshTimer()
 
             case .connected(let data):
+                self.sourceUnavailableSince = nil
                 self.isConnected = true
                 self.fetchFailed = false
                 self.usageData = data
@@ -239,8 +250,14 @@ final class CodexUsageManager: ObservableObject {
                 self.scheduleRefreshTimer()
 
             case .failed:
-                self.isConnected = self.isConnected || UserDefaults.standard.bool(forKey: codexUsageConnectedKey)
-                self.fetchFailed = !self.usageData.isAvailable
+                if wasConnectedBefore, self.sourceUnavailableSince == nil {
+                    self.sourceUnavailableSince = now
+                }
+                self.isConnected = wasConnectedBefore
+                self.fetchFailed = !self.usageData.isAvailable && !self.shouldPreserveStateDuringSourceLoss(
+                    now: now,
+                    wasConnectedBefore: wasConnectedBefore
+                )
                 self.scheduleRefreshTimer()
             }
 
@@ -312,9 +329,18 @@ final class CodexUsageManager: ObservableObject {
         watchedPaths.removeAll()
     }
 
-    private func shouldRetainUsageStateOnDisconnect() -> Bool {
-        guard usageData.isAvailable else { return false }
-        return Date().timeIntervalSince(usageData.lastUpdated) <= Self.authMissingGraceInterval
+    private func shouldPreserveStateDuringSourceLoss(now: Date, wasConnectedBefore: Bool) -> Bool {
+        guard wasConnectedBefore else { return false }
+
+        // Codex may rewrite local auth/session files transiently, so brief absence
+        // should not be treated as a real disconnect.
+        if sourceUnavailableSince == nil {
+            sourceUnavailableSince = now
+            return true
+        }
+
+        guard let sourceUnavailableSince else { return false }
+        return now.timeIntervalSince(sourceUnavailableSince) <= Self.sourceUnavailableGraceInterval
     }
 
     nonisolated private static func loadUsage(planOverride: String?) -> CodexUsageLoadState {
@@ -440,7 +466,10 @@ final class CodexUsageManager: ObservableObject {
     }
 
     nonisolated private static func latestUsageSnapshot(in sessionsURL: URL, after cutoffDate: Date?) -> (primary: CodexSessionEvent.Bucket?, secondary: CodexSessionEvent.Bucket?, plan: String?, timestamp: Date)? {
-        var latestSnapshot: (primary: CodexSessionEvent.Bucket?, secondary: CodexSessionEvent.Bucket?, plan: String?, timestamp: Date)?
+        typealias Snapshot = (primary: CodexSessionEvent.Bucket?, secondary: CodexSessionEvent.Bucket?, plan: String?, timestamp: Date)
+
+        var latestCanonicalSnapshot: Snapshot?
+        var latestFallbackSnapshot: Snapshot?
 
         for fileURL in recentSessionFiles(in: sessionsURL) {
             guard let content = try? String(contentsOf: fileURL, encoding: .utf8) else {
@@ -468,21 +497,24 @@ final class CodexUsageManager: ObservableObject {
                     continue
                 }
 
-                if let latestSnapshot, latestSnapshot.timestamp >= timestamp {
-                    continue
-                }
-
-                latestSnapshot = (
+                let snapshot = (
                     primary: rateLimits.primary,
                     secondary: rateLimits.secondary,
                     plan: rateLimits.planType,
                     timestamp: timestamp
                 )
+                if isCanonicalUsageSnapshot(rateLimits) {
+                    if latestCanonicalSnapshot == nil || latestCanonicalSnapshot!.timestamp < timestamp {
+                        latestCanonicalSnapshot = snapshot
+                    }
+                } else if latestFallbackSnapshot == nil || latestFallbackSnapshot!.timestamp < timestamp {
+                    latestFallbackSnapshot = snapshot
+                }
                 break
             }
         }
 
-        return latestSnapshot
+        return latestCanonicalSnapshot ?? latestFallbackSnapshot
     }
 
     nonisolated private static func accountSwitchCutoffDate(for auth: CodexAuthState) -> Date? {
@@ -611,6 +643,10 @@ final class CodexUsageManager: ObservableObject {
         }
 
         return try? JSONDecoder().decode(CodexSessionEvent.self, from: data)
+    }
+
+    nonisolated private static func isCanonicalUsageSnapshot(_ rateLimits: CodexSessionEvent.RateLimits) -> Bool {
+        rateLimits.limitID == "codex"
     }
 
     nonisolated private static func bucketPercentage(_ bucket: CodexSessionEvent.Bucket?) -> Double {
