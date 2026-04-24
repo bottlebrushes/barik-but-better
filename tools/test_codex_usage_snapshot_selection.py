@@ -32,6 +32,13 @@ class Snapshot:
     secondary_percent: float | None
 
 
+@dataclass
+class BucketState:
+    percentage: float
+    reset_at: datetime | None
+    window_minutes: int
+
+
 def is_canonical(snapshot: Snapshot) -> bool:
     return snapshot.limit_id == "codex"
 
@@ -41,6 +48,26 @@ def preferred_snapshot(events: list[Snapshot]):
     if canonical:
         return max(canonical, key=lambda item: item.timestamp)
     return max(events, key=lambda item: item.timestamp) if events else None
+
+
+def normalize_bucket_state(bucket: BucketState, now: datetime):
+    if bucket.reset_at is None:
+        return bucket
+
+    if bucket.reset_at > now:
+        return bucket
+
+    if bucket.window_minutes <= 0:
+        return BucketState(percentage=0.0, reset_at=None, window_minutes=bucket.window_minutes)
+
+    window_seconds = bucket.window_minutes * 60
+    elapsed_windows = int((now - bucket.reset_at).total_seconds() // window_seconds)
+    next_reset_at = bucket.reset_at.timestamp() + window_seconds * (max(0, elapsed_windows) + 1)
+    return BucketState(
+        percentage=0.0,
+        reset_at=datetime.fromtimestamp(next_reset_at, tz=timezone.utc),
+        window_minutes=bucket.window_minutes,
+    )
 
 
 def fixture_test():
@@ -63,6 +90,22 @@ def fixture_test():
     assert selected is not None
     assert selected.limit_id == "codex", selected
     assert selected.primary_percent == 37.0, selected
+
+
+def expired_bucket_reset_test():
+    bucket = BucketState(
+        percentage=0.92,
+        reset_at=parse_timestamp("2026-04-24T00:07:20.526Z"),
+        window_minutes=300,
+    )
+
+    normalized = normalize_bucket_state(
+        bucket,
+        now=parse_timestamp("2026-04-24T00:12:20.526Z"),
+    )
+
+    assert normalized.percentage == 0.0, normalized
+    assert normalized.reset_at == parse_timestamp("2026-04-24T05:07:20.526Z"), normalized
 
 
 def live_data_test():
@@ -142,9 +185,10 @@ def live_data_test():
 
 def main():
     fixture_test()
+    expired_bucket_reset_test()
     live_data_test()
     now = datetime.now(timezone.utc).isoformat()
-    print(f"{now} codex usage snapshot selection tests passed")
+    print(f"{now} codex usage manager logic tests passed")
 
 
 if __name__ == "__main__":

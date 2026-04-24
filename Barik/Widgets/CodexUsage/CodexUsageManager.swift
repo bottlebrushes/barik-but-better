@@ -91,6 +91,11 @@ private struct CodexUsageRefreshResult {
     let watchPaths: [String]
 }
 
+private struct NormalizedCodexBucketState {
+    let percentage: Double
+    let resetDate: Date?
+}
+
 private enum CodexAuthReadResult {
     case missing
     case loaded(CodexAuthState)
@@ -396,7 +401,7 @@ final class CodexUsageManager: ObservableObject {
             lastActivityDate: activity,
             isAvailable: true
         )
-        return .connected(data: data)
+        return .connected(data: normalizedUsageData(data))
     }
 
     nonisolated private static func readAuthState(from authURL: URL) -> CodexAuthReadResult {
@@ -738,5 +743,59 @@ final class CodexUsageManager: ObservableObject {
         default:
             return trimmed
         }
+    }
+
+    nonisolated private static func normalizedUsageData(
+        _ data: CodexUsageData,
+        now: Date = Date()
+    ) -> CodexUsageData {
+        var normalized = data
+
+        let primary = normalizedBucketState(
+            percentage: data.primaryPercentage,
+            resetDate: data.primaryResetDate,
+            windowMinutes: data.primaryWindowMinutes,
+            now: now
+        )
+        normalized.primaryPercentage = primary.percentage
+        normalized.primaryResetDate = primary.resetDate
+
+        let secondary = normalizedBucketState(
+            percentage: data.secondaryPercentage,
+            resetDate: data.secondaryResetDate,
+            windowMinutes: data.secondaryWindowMinutes,
+            now: now
+        )
+        normalized.secondaryPercentage = secondary.percentage
+        normalized.secondaryResetDate = secondary.resetDate
+
+        return normalized
+    }
+
+    nonisolated private static func normalizedBucketState(
+        percentage: Double,
+        resetDate: Date?,
+        windowMinutes: Int,
+        now: Date
+    ) -> NormalizedCodexBucketState {
+        guard let resetDate else {
+            return NormalizedCodexBucketState(percentage: percentage, resetDate: nil)
+        }
+
+        guard resetDate <= now else {
+            return NormalizedCodexBucketState(percentage: percentage, resetDate: resetDate)
+        }
+
+        guard windowMinutes > 0 else {
+            return NormalizedCodexBucketState(percentage: 0, resetDate: nil)
+        }
+
+        let windowInterval = TimeInterval(windowMinutes * 60)
+        let elapsedWindows = Int(now.timeIntervalSince(resetDate) / windowInterval)
+        let nextResetDate = resetDate.addingTimeInterval(
+            windowInterval * Double(max(0, elapsedWindows) + 1)
+        )
+
+        return NormalizedCodexBucketState(percentage: 0, resetDate: nextResetDate)
     }
 }
